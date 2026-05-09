@@ -1,19 +1,30 @@
 import * as line from '@line/bot-sdk'
 import express from 'express'
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 
 // create LINE SDK config from env variables
 const config = {
-  channelSecret: "d3179805a1781261446611fe2f55e43c",
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 
 // create LINE SDK client
 const client = line.LineBotClient.fromChannelAccessToken({
-  channelAccessToken: "GcsuqTlQt0wy9ZogOzvVF0xM5JU7X/cRY4kQ120Ectdl/YfVhCz8438bc0iHMODyj750fWtEVNz6IYQE83/fRUL4gnd4ItBVTiRm+7E1EYXRzb3RTyuatpjAi8MZidfD6LrzgSYkdil/8t9PU3Yq4gdB04t89/1O/w1cDnyilFU="
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN
 });
+
 
 // create Express app
 // about Express itself: https://expressjs.com/
 const app = express();
+
+app.get('/', (req, res) => {
+  res.send('hello world, Pemika');
+});
+
+const PORT = process.env.PORT || 3001;
+
 
 // register a webhook handler with middleware
 // about the middleware, please refer to doc
