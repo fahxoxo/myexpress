@@ -20,7 +20,7 @@ const client = line.LineBotClient.fromChannelAccessToken({
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('hello world, Pemika fahxoxo fahxoxo connect to hosting');
+  res.send('hello world, Pemika fahxoxo fahxoxo auto auto');
 });
 
 const PORT = process.env.PORT || 3001;
