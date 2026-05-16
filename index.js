@@ -10,7 +10,6 @@ const app = express();
 // create Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  //process.env.SUPABASE_KEY
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
@@ -64,24 +63,32 @@ async function generateAIResponse(text) {
 }
 
 // Analyze image with Gemini Vision
-async function analyzeImageWithGemini(imageData, mimeType) {
+async function analyzeImageWithGemini(imageBuffer, mimeType) {
   try {
-    // imageData ต้องเป็น base64 string
-    let base64String = imageData;
-    if (Buffer.isBuffer(imageData)) {
-      base64String = imageData.toString('base64');
-    }
+    // Ensure we have base64 string from Buffer
+    const base64String = Buffer.isBuffer(imageBuffer) 
+      ? imageBuffer.toString('base64')
+      : imageBuffer;
+    
+    console.log(`📊 Image size: ${base64String.length} characters (base64)`);
     
     const result = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [
         {
-          inlineData: {
-            data: base64String,
-            mimeType: mimeType
-          }
-        },
-        'ระบุว่านี่คือสัตว์ชนิดอะไร ให้คำตอบสั้น ๆ เป็นภาษาไทย'
+          role: 'user',
+          parts: [
+            {
+              text: 'ระบุว่านี่คือสัตว์ชนิดอะไร ให้คำตอบสั้น ๆ เป็นภาษาไทย'
+            },
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64String
+              }
+            }
+          ]
+        }
       ]
     });
     return result.text;
@@ -95,10 +102,7 @@ async function analyzeImageWithGemini(imageData, mimeType) {
 // 4. ฟังก์ชันหลักในการจัดการ Event และบันทึกข้อมูล
 async function handleEvent(event) {
   // รองรับเฉพาะ Event ประเภทข้อความ (Message Event) เท่านั้น
-  if (event.type === "message" && event.message.type === "image") {
-    return handleImageMessage(event);
-  }
-
+  if (event.type !== "message") return;
 
   const userId = event.source.userId || 'unknown';
   const replyToken = event.replyToken || '';
@@ -109,6 +113,7 @@ async function handleEvent(event) {
  
   let content = null;
   let botReplyText = '';
+  let imageUrl = null;
 
   try {
     // ตรวจสอบเงื่อนไขตามประเภทข้อความ
@@ -121,15 +126,33 @@ async function handleEvent(event) {
       console.log(`🤖 Gemini Response: ${botReplyText}`);
       
     } else if (event.message.type === 'image') {
-      // ดึง image content จาก LINE
-      const imageBuffer = await client.getMessageContent(messageId);
-      
       console.log(`🖼️ Image Message from ${userId}`);
+      
+      // ดาวน์โหลดรูปภาพจาก LINE โดยใช้ lineBlobClient
+      const imageStream = await lineBlobClient.getMessageContent(messageId);
+      
+      // แปลง stream เป็น Buffer
+      let imageBuffer;
+      if (imageStream.arrayBuffer) {
+        const arrayBuffer = await imageStream.arrayBuffer();
+        imageBuffer = Buffer.from(arrayBuffer);
+      } else {
+        // Handle as stream
+        const chunks = [];
+        for await (const chunk of imageStream) {
+          chunks.push(chunk);
+        }
+        imageBuffer = Buffer.concat(chunks);
+      }
       
       // วิเคราะห์รูปภาพด้วย Gemini Vision
       content = `[Image: ${messageId}]`;
       botReplyText = await analyzeImageWithGemini(imageBuffer, 'image/jpeg');
       console.log(`🔍 Image Analysis: ${botReplyText}`);
+      
+      // อัปโหลดรูปภาพไปยัง Supabase Storage
+      imageUrl = await uploadImageToStorage(messageId, imageBuffer);
+      console.log(`📤 Image uploaded: ${imageUrl}`);
       
     } else {
       // หากเป็นประเภทอื่น เช่น sticker, video
@@ -148,7 +171,8 @@ async function handleEvent(event) {
           type: messageType,
           content: content,
           reply_token: replyToken,
-          reply_content: botReplyText
+          reply_content: botReplyText,
+          image_url: imageUrl
         }
       ]);
 
@@ -186,6 +210,74 @@ async function handleEvent(event) {
     } catch (replyError) {
       console.error('❌ Failed to send error message:', replyError);
     }
+  }
+}
+
+// 1. สร้าง Blob Client สำหรับดึงข้อมูลไฟล์โดยเฉพาะ (ของ v9+)
+const lineBlobClient = new line.messagingApi.MessagingApiBlobClient({
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
+});
+
+const downloadLineContent = async (messageId) => {
+  const stream = await lineBlobClient.getMessageContent(messageId);
+  const chunks = [];
+ 
+  // รองรับทั้งแบบ Blob (มี arrayBuffer) และแบบ Stream
+  if (stream.arrayBuffer) {
+    const arrayBuffer = await stream.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return {
+      inlineData: {
+        data: buffer.toString('base64'),
+        mimeType: stream.type || 'image/jpeg'
+      },
+      buffer: buffer
+    };
+  } else {
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+    return {
+      inlineData: {
+        data: buffer.toString('base64'),
+        mimeType: 'image/jpeg'
+      },
+      buffer: buffer
+    };
+  }
+};
+// Function to upload image to Supabase Storage
+async function uploadImageToStorage(messageId, imageBuffer) {
+  try {
+    const fileName = `${messageId}.jpg`;
+    
+    console.log(`🔄 Uploading image: ${fileName}`);
+
+    // Upload without upsert flag to avoid RLS issues
+    const { data: uploadData, error: uploadError } = await supabase
+      .storage
+      .from('uploads')
+      .upload(`images/${fileName}`, imageBuffer, {
+        contentType: 'image/jpeg'
+      });
+
+    if (uploadError) {
+      console.error('❌ Storage Upload Error:', uploadError.message);
+      return null;
+    }
+
+    // Get public URL
+    const { data: publicUrlData } = supabase
+      .storage
+      .from('uploads')
+      .getPublicUrl(`images/${fileName}`);
+
+    return publicUrlData.publicUrl;
+
+  } catch (error) {
+    console.error('❌ Error uploading image:', error.message);
+    return null;
   }
 }
 
